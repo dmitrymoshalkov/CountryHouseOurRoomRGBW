@@ -21,6 +21,14 @@ safe/request values after restart/loss of connection
 #include "MySensor.h"	
 // Load Serial Peripheral Interface library  
 #include <SPI.h>
+#include <Encoder.h>
+#include <Bounce2.h>
+#include <RGBConverter.h>
+
+
+double hsv[3];
+
+
 
 // Arduino pin attached to driver pins
 #define RED_PIN 3 
@@ -37,6 +45,27 @@ safe/request values after restart/loss of connection
 const int pwmIntervals = 255; //255;
 float R; // equation for dimming curve
 
+
+#define KNOB_ENC_PIN_1 14    // Rotary encoder input pin 1 (A0)
+#define KNOB_ENC_PIN_2 7    // Rotary encoder input pin 2
+#define KNOB_BUTTON_PIN 8   // Rotary encoder button pin 
+//#define FADE_DELAY 10       // Delay in ms for each percentage fade up/down (10ms = 1s full-range dim)
+#define SEND_THROTTLE_DELAY 400 // Number of milliseconds before sending after user stops turning knob
+
+#define KNOBUPDATE_TIME 500
+
+#define RADIO_RESET_DELAY_TIME 50 //Задержка между сообщениями
+#define MESSAGE_ACK_RETRY_COUNT 5  //количество попыток отсылки сообщения с запросом подтверждения
+#define DATASEND_DELAY  10
+
+boolean gotAck=false; //подтверждение от гейта о получении сообщения 
+int iCount = MESSAGE_ACK_RETRY_COUNT;
+
+
+Encoder knob(KNOB_ENC_PIN_2, KNOB_ENC_PIN_1);  
+Bounce debouncer = Bounce(); 
+byte oldButtonVal;
+long lastencoderValue=0;
 
 MySensor gw;	
    
@@ -55,9 +84,28 @@ boolean isOn = true;
 
 // time tracking for updates
 unsigned long lastupdate = millis();
-     
+ 
+
+// update knobs changed
+unsigned long lastKnobsChanged;
+boolean bNeedToSendUpdate = false;
+
+
+RGBConverter RGBConv;  
+
+MyMessage msgLedStripStatus(SENSOR_ID, V_STATUS);
+
+
 void setup() 
 {
+
+  // Set knob button pin as input (with debounce)
+  pinMode(KNOB_BUTTON_PIN, INPUT);
+  digitalWrite(KNOB_BUTTON_PIN, HIGH);
+  debouncer.attach(KNOB_BUTTON_PIN);
+  debouncer.interval(5);
+  oldButtonVal = debouncer.read();
+
   // Initializes the sensor node (with callback function for incoming messages)
   gw.begin(incomingMessage, NODE_ID, false);	// 123 = node id for testing	
        
@@ -109,6 +157,10 @@ void loop()
     updateLights();
     lastupdate = millis();
   } 
+
+  checkButtonClick();
+
+checkRotaryEncoder();
 }
 
 // callback function for incoming messages
@@ -117,7 +169,8 @@ void incomingMessage(const MyMessage &message) {
   // acknoledgment
   if (message.isAck())
   {
-   	Serial.println("Got ack from gateway");
+    gotAck = true;
+    return;
   }
   
   // new dim level
@@ -143,12 +196,16 @@ void incomingMessage(const MyMessage &message) {
   else if (message.type == V_RGBW) {    
     const char * rgbvalues = message.getString();
     //Serial.println("Got RGBW command");
-    inputToRGBW(rgbvalues);    
+    inputToRGBW(rgbvalues);   
+
+
   }  
 }
 
 // this gets called every INTERVAL milliseconds and updates the current pwm levels for all colors
 void updateLights() {  
+
+
 
   // update pin values -debug
   //Serial.println(greenval);
@@ -249,10 +306,18 @@ void inputToRGBW(const char * input) {
    // Serial.println("Wrong length of input");
   }  
 
+    RGBConv.rgbToHsv(target_values[0], target_values[1], target_values[2], hsv);
 
-  //Serial.print("New color values: ");
-  //Serial.println(input);
+
+   knob.write(hsv[2]*100);
+   lastencoderValue = hsv[2]*100;
+
+  Serial.print("New color values: ");
+  Serial.println(input);
   
+
+
+
   for (int i = 0; i < NUM_CHANNELS; i++) {
   //  Serial.print(target_values[i]);
   //  Serial.print(", ");
@@ -275,3 +340,96 @@ byte fromhex (const char * str)
     c -= 7;
   return (result << 4) | c;
 }
+
+
+
+  void checkButtonClick() {
+  debouncer.update();
+  byte buttonVal = debouncer.read();
+  byte newLevel = 0;
+  if (buttonVal != oldButtonVal && buttonVal == LOW) {
+
+  	if (isOn)
+  	{
+  		isOn = false;
+  	}
+  	else
+  	{
+  		isOn = true;
+  	}
+
+     		   			//Отсылаем состояние переключателя
+			            iCount = MESSAGE_ACK_RETRY_COUNT;
+
+			              while( !gotAck && iCount > 0 )
+			                {
+			      
+			    	            gw.send(msgLedStripStatus.set(isOn?"1":"0"), true);
+			                    gw.wait(RADIO_RESET_DELAY_TIME);
+			                  iCount--;
+			                 }
+
+			                gotAck = false;	
+
+
+  }
+  oldButtonVal = buttonVal;
+}
+
+
+
+
+
+void checkRotaryEncoder() {
+  long encoderValue = knob.read();
+
+  if (encoderValue != lastencoderValue)
+  {
+  			Serial.print("Encoder value: ");
+  			Serial.println(encoderValue);
+  			lastencoderValue=encoderValue;
+
+
+
+   hsv[2]=(double)encoderValue/100.0;
+
+
+
+	RGBConv.hsvToRgb(hsv[0], hsv[1], hsv[2], target_values);
+
+	lastKnobsChanged = mills();
+	bNeedToSendUpdate = true;
+
+    //RGBConv.hsvToRgb(hsv[0], hsv[1], hsv[2], target_values);
+  }
+
+  if (encoderValue > 100) {
+    encoderValue = 100;
+    knob.write(100);
+  } else if (encoderValue < 18) {
+    encoderValue = 18;
+    knob.write(18);
+  }
+
+ 
+}
+
+void updateBrightness()
+{
+
+ unsigned long currentTempMillis = millis();
+    if((currentTempMillis - lastKnobsChanged ) > KNOBUPDATE_TIME && bNeedToSendUpdate) {
+
+	{
+
+			bNeedToSendUpdate = false;
+
+	}
+
+}
+
+
+
+
+
+
