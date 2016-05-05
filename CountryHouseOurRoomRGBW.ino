@@ -1,17 +1,8 @@
-/**
-Based on the MySensors Project: http://www.mysensors.org
 
-This sketch controls a (analog)RGBW strip by listening to new color values from a (domoticz) controller and then fading to the new color.
 
-Version 0.9 - Oliver Hilsky
+//#define NDEBUG                        // enable local debugging information
 
-TODO
-safe/request values after restart/loss of connection
-*/
-
-#define NDEBUG                        // enable local debugging information
-
-#define SKETCH_NAME "RGBW Led strip"
+#define SKETCH_NAME "RGB LedStrip"
 #define SKETCH_MAJOR_VER "1"
 #define SKETCH_MINOR_VER "0"
 #define NODE_ID 29 //or AUTO to let controller assign   
@@ -27,7 +18,7 @@ safe/request values after restart/loss of connection
 
 
 double hsv[3];
-
+double savedhsv[3];
 
 
 // Arduino pin attached to driver pins
@@ -38,6 +29,7 @@ double hsv[3];
 #define NUM_CHANNELS 3 // how many channels, RGBW=4 RGB=3...
 
 #define SENSOR_ID 30
+#define REBOOT_CHILD_ID                       100
 
 // Smooth stepping between the values
 #define STEP 1
@@ -49,23 +41,44 @@ float R; // equation for dimming curve
 #define KNOB_ENC_PIN_1 14    // Rotary encoder input pin 1 (A0)
 #define KNOB_ENC_PIN_2 7    // Rotary encoder input pin 2
 #define KNOB_BUTTON_PIN 8   // Rotary encoder button pin 
+
+#define KNOBCOLOR_ENC_PIN_1 16    // Rotary encoder input pin 1 (A0)
+#define KNOBCOLOR_ENC_PIN_2 18    // Rotary encoder input pin 2
+#define KNOBCOLOR_BUTTON_PIN 15   // Rotary encoder button pin 
+
+#define NOCONTROLLER_MODE_PIN 17
+
 //#define FADE_DELAY 10       // Delay in ms for each percentage fade up/down (10ms = 1s full-range dim)
 #define SEND_THROTTLE_DELAY 400 // Number of milliseconds before sending after user stops turning knob
 
 #define KNOBUPDATE_TIME 500
 
-#define RADIO_RESET_DELAY_TIME 50 //Задержка между сообщениями
+#define RADIO_RESET_DELAY_TIME 25 //Задержка между сообщениями
 #define MESSAGE_ACK_RETRY_COUNT 5  //количество попыток отсылки сообщения с запросом подтверждения
 #define DATASEND_DELAY  10
+#define GWSTATUSCHECK_TIME 150000
+
 
 boolean gotAck=false; //подтверждение от гейта о получении сообщения 
+
 int iCount = MESSAGE_ACK_RETRY_COUNT;
 
 
 Encoder knob(KNOB_ENC_PIN_2, KNOB_ENC_PIN_1);  
+Encoder knobcolor(KNOBCOLOR_ENC_PIN_1, KNOBCOLOR_ENC_PIN_2);  
+
 Bounce debouncer = Bounce(); 
+Bounce debouncercolor = Bounce(); 
 byte oldButtonVal;
+byte oldColorButtonVal;
+boolean whiteColor=false;
+
 long lastencoderValue=0;
+long lastcolorencoderValue=0;
+
+boolean bGatewayPresent = true;
+byte bNoControllerMode = HIGH;
+unsigned long previousStatMillis = 0;
 
 MySensor gw;	
    
@@ -89,12 +102,12 @@ unsigned long lastupdate = millis();
 // update knobs changed
 unsigned long lastKnobsChanged;
 boolean bNeedToSendUpdate = false;
-
+Bounce debouncernocontroller = Bounce(); 
 
 RGBConverter RGBConv;  
 
 MyMessage msgLedStripStatus(SENSOR_ID, V_STATUS);
-
+MyMessage msgLedStripColor(SENSOR_ID, V_RGBW);
 
 void setup() 
 {
@@ -106,16 +119,17 @@ void setup()
   debouncer.interval(5);
   oldButtonVal = debouncer.read();
 
-  // Initializes the sensor node (with callback function for incoming messages)
-  gw.begin(incomingMessage, NODE_ID, false);	// 123 = node id for testing	
-       
-  // Present sketch (name, version)			
-   gw.sendSketchInfo(SKETCH_NAME, SKETCH_MAJOR_VER"."SKETCH_MINOR_VER);      
-  // Register sensors (id, type, description, ack back)
-  gw.present(SENSOR_ID, S_RGBW_LIGHT, "RGBW test light", true);
+  pinMode(KNOBCOLOR_BUTTON_PIN, INPUT);
+  digitalWrite(KNOBCOLOR_BUTTON_PIN, HIGH);  
+  debouncercolor.attach(KNOBCOLOR_BUTTON_PIN);
+  debouncercolor.interval(5);
+  oldColorButtonVal = debouncercolor.read();
 
-  // request current values from gateway/controller
-  //gw.request(SENSOR_ID, S_RGBW_LIGHT);
+    pinMode(NOCONTROLLER_MODE_PIN,INPUT);
+    digitalWrite(NOCONTROLLER_MODE_PIN,HIGH);
+    debouncernocontroller.attach(NOCONTROLLER_MODE_PIN);
+    debouncernocontroller.interval(5);
+    bNoControllerMode = debouncernocontroller.read();
 
   // Set all channels to output (pin number, type)
   for (int i = 0; i < NUM_CHANNELS; i++) {
@@ -126,31 +140,84 @@ void setup()
   R = (pwmIntervals * log10(2))/(log10(255));
 
 
+   if (bNoControllerMode != LOW)
+   {
+
+  // Initializes the sensor node (with callback function for incoming messages)
+  gw.begin(incomingMessage, NODE_ID, false);	// 123 = node id for testing	
+       
+  // Present sketch (name, version)			
+   gw.sendSketchInfo(SKETCH_NAME, SKETCH_MAJOR_VER"."SKETCH_MINOR_VER);      
+  // Register sensors (id, type, description, ack back)
+  gw.present(SENSOR_ID, S_RGBW_LIGHT, "RGBW test light");
+
+        //reboot sensor command
+    gw.wait(RADIO_RESET_DELAY_TIME);
+    gw.present(REBOOT_CHILD_ID, S_BINARY); //, "Reboot node sensor", true); 
+
+
+
+
+    gw.wait(RADIO_RESET_DELAY_TIME);
     gw.request(SENSOR_ID, V_RGBW);
   	gw.wait(1000); 
 
 
+    gw.wait(RADIO_RESET_DELAY_TIME);
+    gw.request(SENSOR_ID, V_STATUS);
+
+  }
+  else
+  {
+
+    inputToRGBW("029377"); 
+
+  }
 
 TCCR0A = _BV(COM0A1) | _BV(COM0B1) | _BV(WGM00); //disable FastPWM on Timer0. mills lasts twice longer
 
   // init lights
   updateLights();
  
-         #ifdef NDEBUG 
+  #ifdef NDEBUG 
   // debug
   if (isOn) {
     Serial.println("RGBW is running...");
   }
  
   Serial.println("Waiting for messages...");  
-  		#endif	
+  #endif	
+
+
+  wdt_enable(WDTO_8S);
 
 }
 
 void loop()
 {
-  // Process incoming messages (like config and light state from controller) - basically keep the mysensors protocol running
-  gw.process();		
+
+
+  debouncernocontroller.update();
+  byte switchState = debouncernocontroller.read();
+
+  if (switchState != bNoControllerMode) 
+  {
+      #ifdef NDEBUG
+          Serial.print("Controller mode ");
+          Serial.println(switchState);          
+        #endif
+      
+      bNoControllerMode = switchState;
+      wdt_enable(WDTO_30MS);
+        while(1) {};
+  }
+
+
+     if (bNoControllerMode != LOW  && bGatewayPresent )
+     { 
+        // Process incoming messages (like config and light state from controller) - basically keep the mysensors protocol running
+        gw.process();		
+      }
 
   // and set the new light colors
   if (millis() > lastupdate + INTERVAL) {
@@ -158,9 +225,21 @@ void loop()
     lastupdate = millis();
   } 
 
-  checkButtonClick();
+checkButtonClick();
+
+checkColorButtonClick();
 
 checkRotaryEncoder();
+
+checkRotaryEncoderColor();
+
+updateBrightness();
+
+checkGatewayStatus();
+
+    //reset watchdog timer
+    wdt_reset();   
+
 }
 
 // callback function for incoming messages
@@ -172,7 +251,14 @@ void incomingMessage(const MyMessage &message) {
     gotAck = true;
     return;
   }
-  
+ 
+    if ( message.sensor == REBOOT_CHILD_ID && message.getBool() == true && strlen(message.getString())>0 ) 
+    {
+             wdt_enable(WDTO_30MS);
+              while(1) {};
+
+     }
+
   // new dim level
   else if (message.type == V_DIMMER) {
       target_dimming = message.getByte();
@@ -183,19 +269,18 @@ void incomingMessage(const MyMessage &message) {
 
     isOn = message.getInt();
 
-        #ifdef NDEBUG
+    #ifdef NDEBUG
     if (isOn) {
       Serial.println("on");
     } else {
       Serial.println("off");
     }
-    	#endif
+    #endif
   }
 
   // new color value
   else if (message.type == V_RGBW) {    
     const char * rgbvalues = message.getString();
-    //Serial.println("Got RGBW command");
     inputToRGBW(rgbvalues);   
 
 
@@ -205,19 +290,6 @@ void incomingMessage(const MyMessage &message) {
 // this gets called every INTERVAL milliseconds and updates the current pwm levels for all colors
 void updateLights() {  
 
-
-
-  // update pin values -debug
-  //Serial.println(greenval);
-  //Serial.println(redval);
-  //Serial.println(blueval);
-  //Serial.println(whiteval);
-
-  //Serial.println(target_greenval);
-  //Serial.println(target_redval);
-  //Serial.println(target_blueval);
-  //Serial.println(target_whiteval);
-  //Serial.println("+++++++++++++++");
 
   // for each color
   for (int v = 0; v < NUM_CHANNELS; v++) {
@@ -251,19 +323,7 @@ void updateLights() {
     }
   }
 
-  /*
-  // debug - new values
-  Serial.println(greenval);
-  Serial.println(redval);
-  Serial.println(blueval);
-  Serial.println(whiteval);
 
-  Serial.println(target_greenval);
-  Serial.println(target_redval);
-  Serial.println(target_blueval);
-  Serial.println(target_whiteval);
-  Serial.println("+++++++++++++++");
-  */
 
   // set actual pin values
   for (int i = 0; i < NUM_CHANNELS; i++) {
@@ -282,11 +342,7 @@ void updateLights() {
 // converts incoming color string to actual (int) values
 // ATTENTION this currently does nearly no checks, so the format needs to be exactly like domoticz sends the strings
 void inputToRGBW(const char * input) {
-  //Serial.print("Got color value of length: "); 
-  //Serial.println(strlen(input));
-  
-    //Serial.print("New color values recv: ");
-  //Serial.println(input);
+
 
   if (strlen(input) == 6) {
 
@@ -309,23 +365,47 @@ void inputToRGBW(const char * input) {
     RGBConv.rgbToHsv(target_values[0], target_values[1], target_values[2], hsv);
 
 
-   knob.write(hsv[2]*100);
+   
    lastencoderValue = hsv[2]*100;
+
+   if (lastencoderValue < 18)
+   {
+    lastencoderValue = 18;
+   }
+  
+   if (lastencoderValue > 100)
+   {
+    lastencoderValue = 100;
+   }
+
+  knob.write(lastencoderValue);
+
+
+
+lastcolorencoderValue = hsv[0]*100;     
+
+   if (lastcolorencoderValue < 0)
+   {
+    lastcolorencoderValue = 0;
+   }
+  
+   if (lastcolorencoderValue > 100)
+   {
+    lastcolorencoderValue = 100;
+   }
+
+knobcolor.write(lastcolorencoderValue);
+
+
+  #ifdef NDEBUG 
+  Serial.print("New encoder value: ");
+  Serial.println(lastencoderValue);
 
   Serial.print("New color values: ");
   Serial.println(input);
-  
+  #endif
 
 
-
-  for (int i = 0; i < NUM_CHANNELS; i++) {
-  //  Serial.print(target_values[i]);
-  //  Serial.print(", ");
-  }
- 
- // Serial.println("");
-  //Serial.print("Dimming: ");
-  //Serial.println(dimming);
 }
 
 // converts hex char to byte
@@ -340,6 +420,8 @@ byte fromhex (const char * str)
     c -= 7;
   return (result << 4) | c;
 }
+
+
 
 
 
@@ -358,6 +440,8 @@ byte fromhex (const char * str)
   		isOn = true;
   	}
 
+     if (bNoControllerMode != LOW  && bGatewayPresent )
+     {
      		   			//Отсылаем состояние переключателя
 			            iCount = MESSAGE_ACK_RETRY_COUNT;
 
@@ -371,6 +455,17 @@ byte fromhex (const char * str)
 
 			                gotAck = false;	
 
+          if ( iCount == 0 )
+          {
+
+              bGatewayPresent = false;
+
+                  #ifdef NDEBUG 
+                  Serial.println("No gateway present"); 
+                  #endif 
+          }
+                 
+      }
 
   }
   oldButtonVal = buttonVal;
@@ -378,6 +473,44 @@ byte fromhex (const char * str)
 
 
 
+  void checkColorButtonClick() {
+  debouncercolor.update();
+  byte buttonVal = debouncercolor.read();
+  byte newLevel = 0;
+  if (buttonVal != oldColorButtonVal && buttonVal == LOW) {
+
+  #ifdef NDEBUG 
+  Serial.println(buttonVal);
+  #endif
+
+  if ( !whiteColor )
+  {
+    whiteColor= true;
+ 
+     savedhsv[0] = hsv[0];
+     savedhsv[1] = hsv[1];
+     //savedhsv[2] = hsv[2];
+     savedhsv[2] = (double)lastcolorencoderValue;
+
+     hsv[0]=0.0;
+     hsv[1]=0.0;
+  }
+  else
+  {
+    whiteColor= false;
+ 
+     hsv[0] = savedhsv[0];
+     hsv[1] = savedhsv[1];
+     lastcolorencoderValue = savedhsv[2] * 100 /100;
+     knobcolor.write(lastcolorencoderValue);
+
+  }
+
+ RGBConv.hsvToRgb(hsv[0], hsv[1], hsv[2], target_values);
+
+  }
+  oldColorButtonVal = buttonVal;
+}
 
 
 void checkRotaryEncoder() {
@@ -385,8 +518,11 @@ void checkRotaryEncoder() {
 
   if (encoderValue != lastencoderValue)
   {
+        #ifdef NDEBUG 
   			Serial.print("Encoder value: ");
   			Serial.println(encoderValue);
+        #endif
+
   			lastencoderValue=encoderValue;
 
 
@@ -397,10 +533,10 @@ void checkRotaryEncoder() {
 
 	RGBConv.hsvToRgb(hsv[0], hsv[1], hsv[2], target_values);
 
-	lastKnobsChanged = mills();
+	lastKnobsChanged = millis();
 	bNeedToSendUpdate = true;
 
-    //RGBConv.hsvToRgb(hsv[0], hsv[1], hsv[2], target_values);
+
   }
 
   if (encoderValue > 100) {
@@ -414,22 +550,183 @@ void checkRotaryEncoder() {
  
 }
 
+void checkRotaryEncoderColor() {
+  long encoderValue = knobcolor.read();
+
+  if (encoderValue != lastcolorencoderValue && !whiteColor)
+  {
+
+        #ifdef NDEBUG 
+        Serial.print("Encoder color value: ");
+        Serial.println(encoderValue);
+        lastcolorencoderValue=encoderValue;
+        #endif
+
+
+   hsv[0]=(double)encoderValue/100.0;
+   hsv[1] = 1;
+
+
+  RGBConv.hsvToRgb(hsv[0], hsv[1], hsv[2], target_values);
+
+  lastKnobsChanged = millis();
+  bNeedToSendUpdate = true;
+
+  }
+
+  if (encoderValue > 100) {
+    encoderValue = 0;
+    knobcolor.write(0);
+  } else if (encoderValue < 0) {
+    encoderValue =100;
+    knobcolor.write(100);
+  }
+
+ 
+}
+
+
 void updateBrightness()
 {
 
  unsigned long currentTempMillis = millis();
-    if((currentTempMillis - lastKnobsChanged ) > KNOBUPDATE_TIME && bNeedToSendUpdate) {
+    if((currentTempMillis - lastKnobsChanged ) > KNOBUPDATE_TIME && bNeedToSendUpdate)
 
 	{
 
 			bNeedToSendUpdate = false;
+
+      #ifdef NDEBUG 
+      Serial.print("H: ");
+      Serial.print(hsv[0]);
+      Serial.print(" S: ");
+      Serial.print(hsv[1]);
+      Serial.print(" V: ");
+      Serial.println(hsv[2]);    
+      #endif
+ 
+ sendColorState();
 
 	}
 
 }
 
 
+void sendColorState()
+{
+
+double iHue = modifiedMap(hsv[0], 0.0, 1.0, 0.0, 360.0);     
+ double iSat = modifiedMap(hsv[1], 0.0, 1.0, 0.0, 100.0); 
+ double iBr = modifiedMap(hsv[2], 0.0, 1.0, 0.0, 100.0); 
+
+char cMsg[20];
+char cH[8];
+char cS[8];
+char cB[8];
 
 
+      #ifdef NDEBUG 
+      Serial.print("H1: ");
+      Serial.print(iHue);
+      Serial.print(" S1: ");
+      Serial.print(iSat);
+      Serial.print(" V1: ");
+      Serial.println(iBr); 
+      #endif
 
 
+dtostrf(iHue, 4, 2, cH);
+dtostrf(iSat, 4, 2, cS);
+dtostrf(iBr, 4, 2, cB);
+
+
+sprintf(cMsg,"%s-%s-%s",cH,cS,cB);
+      //Serial.println(cMsg); 
+
+     if (bNoControllerMode != LOW  && bGatewayPresent )
+     {      
+
+                  iCount = MESSAGE_ACK_RETRY_COUNT;
+
+                    while( !gotAck && iCount > 0 )
+                      {
+            
+                      gw.send(msgLedStripColor.set(cMsg), true);
+                       gw.wait(RADIO_RESET_DELAY_TIME);
+                        iCount--;
+                       }
+
+                      gotAck = false;    
+
+          if ( iCount == 0 )
+          {
+
+              bGatewayPresent = false;
+                  #ifdef NDEBUG 
+                  Serial.println("No gateway present"); 
+                  #endif 
+          }
+
+      }                  
+
+}
+
+
+double modifiedMap(double x, double in_min, double in_max, double out_min, double out_max)
+{
+ double temp = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+ temp = (int) (4*temp + .5);
+ return (double) temp/4;
+}
+
+
+void checkGatewayStatus()
+{
+
+if ( bNoControllerMode != LOW )
+{
+    unsigned long currentStatMillis = millis();
+    if((currentStatMillis - previousStatMillis ) > GWSTATUSCHECK_TIME ) 
+      {
+
+
+        // Save the current millis
+        previousStatMillis = currentStatMillis;
+
+                //Отсылаем состояние переключателя
+                  iCount = MESSAGE_ACK_RETRY_COUNT;
+
+                    while( !gotAck && iCount > 0 )
+                      {
+            
+                        gw.send(msgLedStripStatus.set(isOn?"1":"0"), true);
+                          gw.wait(RADIO_RESET_DELAY_TIME);
+                        iCount--;
+                       }
+
+                      gotAck = false; 
+
+
+      if ( iCount > 0 )
+      {
+
+          bGatewayPresent = true;
+            #ifdef NDEBUG 
+            Serial.println("Gateway present"); 
+            #endif          
+
+      }
+      else
+      {
+
+          bGatewayPresent = false;
+            #ifdef NDEBUG 
+            Serial.println("No gateway present"); 
+            #endif   
+      }
+
+      }
+
+
+}
+}
