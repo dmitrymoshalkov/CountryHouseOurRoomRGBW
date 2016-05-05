@@ -559,9 +559,9 @@ void checkRotaryEncoderColor() {
         #ifdef NDEBUG 
         Serial.print("Encoder color value: ");
         Serial.println(encoderValue);
-        lastcolorencoderValue=encoderValue;
         #endif
 
+        lastcolorencoderValue=encoderValue;
 
    hsv[0]=(double)encoderValue/100.0;
    hsv[1] = 1;
@@ -590,7 +590,7 @@ void updateBrightness()
 {
 
  unsigned long currentTempMillis = millis();
-    if((currentTempMillis - lastKnobsChanged ) > KNOBUPDATE_TIME && bNeedToSendUpdate)
+    if(((currentTempMillis - lastKnobsChanged ) > KNOBUPDATE_TIME) && bNeedToSendUpdate)
 
 	{
 
